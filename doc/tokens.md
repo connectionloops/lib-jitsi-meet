@@ -151,7 +151,7 @@ c2s_require_encryption=false
 
 Modify your Prosody config with these three steps:
 
-\1. Adjust *plugin_paths* to contain the path pointing to jitsi meet Prosody plugins location. That's where plugins are copied on *jitsi-meet-token* package install. This should be included in global config section(possibly at the beginning of your host config file).
+\1. Adjust *plugin_paths* to contain the path pointing to Cloops Meet Prosody plugins location. That's where plugins are copied on *jitsi-meet-token* package install. This should be included in global config section(possibly at the beginning of your host config file).
 
 ```lua
 plugin_paths = { "/usr/share/jitsi-meet/prosody-plugins/" }
