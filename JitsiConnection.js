@@ -8,9 +8,9 @@ import {
 } from './service/statistics/AnalyticsEvents';
 
 /**
- * Creates a new connection object for the Cloops Meet server side video
+ * Creates a new connection object for the TWA Meet server side video
  * conferencing service. Provides access to the JitsiConference interface.
- * @param appID identification for the provider of Cloops Meet video conferencing
+ * @param appID identification for the provider of TWA Meet video conferencing
  * services.
  * @param token the JWT token used to authenticate with the server(optional)
  * @param options Object with properties / settings related to connection with

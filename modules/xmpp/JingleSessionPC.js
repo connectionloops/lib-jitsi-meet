@@ -729,7 +729,7 @@ export default class JingleSessionPC extends JingleSession {
     }
 
     /**
-     * Sends Jingle 'session-info' message which includes custom Cloops Meet
+     * Sends Jingle 'session-info' message which includes custom TWA Meet
      * 'ice-state' element with the text value 'failed' to let Jicofo know
      * that the ICE connection has entered the failed state. It can then
      * choose to re-create JVB channels and send 'transport-replace' to

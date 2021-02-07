@@ -1,6 +1,6 @@
-# Cloops Meet API library
+# TWA Meet API library
 
-You can use Cloops Meet API to create Cloops Meet video conferences with a custom GUI.
+You can use TWA Meet API to create TWA Meet video conferences with a custom GUI.
 
 ## Installation
 
