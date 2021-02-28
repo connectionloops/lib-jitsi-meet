@@ -1,12 +1,8 @@
 TWA Meet API
 ============
 
-You can use TWA Meet API to create TWA Meet video conferences with custom GUI.
 
-Installation
-==========
-
-To embed TWA Meet API in your application you need to add TWA Meet API library
+To embed Meet API in your application you need to add TWA Meet API library
 
 ```html
 <script src="https://meet.jit.si/libs/lib-jitsi-meet.min.js"></script>
@@ -582,3 +578,5 @@ room.join();
 ```
 
 After that step you are in the conference. Now you can continue with adding some code that will handle the events and manage the conference.
+=======
+This document has been moved here: https://jitsi.github.io/handbook/docs/dev-guide/dev-guide-ljm-api

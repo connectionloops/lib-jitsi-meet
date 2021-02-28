@@ -30,7 +30,8 @@ import VADTalkMutedDetection from './modules/detection/VADTalkMutedDetection';
 import { E2EEncryption } from './modules/e2ee/E2EEncryption';
 import E2ePing from './modules/e2eping/e2eping';
 import Jvb121EventGenerator from './modules/event/Jvb121EventGenerator';
-import { QualityController } from './modules/qualitycontrol/QualityController';
+import { ReceiveVideoController } from './modules/qualitycontrol/ReceiveVideoController';
+import { SendVideoController } from './modules/qualitycontrol/SendVideoController';
 import RecordingManager from './modules/recording/RecordingManager';
 import Settings from './modules/settings/Settings';
 import AudioOutputProblemDetector from './modules/statistics/AudioOutputProblemDetector';
@@ -149,6 +150,11 @@ export default function JitsiConference(options) {
 
     // when muted by focus we receive the jid of the initiator of the mute
     this.mutedByFocusActor = null;
+
+    this.isVideoMutedByFocus = false;
+
+    // when video muted by focus we receive the jid of the initiator of the mute
+    this.mutedVideoByFocusActor = null;
 
     // Flag indicates if the 'onCallEnded' method was ever called on this
     // instance. Used to log extra analytics event for debugging purpose.
@@ -376,7 +382,8 @@ JitsiConference.prototype._init = function(options = {}) {
         this.eventManager.setupRTCListeners();
     }
 
-    this.qualityController = new QualityController(this);
+    this.receiveVideoController = new ReceiveVideoController(this, this.rtc);
+    this.sendVideoController = new SendVideoController(this, this.rtc);
 
     this.participantConnectionStatus
         = new ParticipantConnectionStatusHandler(
@@ -1017,13 +1024,22 @@ JitsiConference.prototype._fireMuteChangeEvent = function(track) {
         this.isMutedByFocus = false;
 
         // unmute local user on server
-        this.room.muteParticipant(this.room.myroomjid, false);
+        this.room.muteParticipant(this.room.myroomjid, false, MediaType.AUDIO);
+    } else if (this.isVideoMutedByFocus && track.isVideoTrack() && !track.isMuted()) {
+        this.isVideoMutedByFocus = false;
+
+        // unmute local user on server
+        this.room.muteParticipant(this.room.myroomjid, false, MediaType.VIDEO);
     }
 
     let actorParticipant;
 
-    if (this.mutedByFocusActor) {
+    if (this.mutedByFocusActor && track.isAudioTrack()) {
         const actorId = Strophe.getResourceFromJid(this.mutedByFocusActor);
+
+        actorParticipant = this.participants[actorId];
+    } else if (this.mutedVideoByFocusActor && track.isVideoTrack()) {
+        const actorId = Strophe.getResourceFromJid(this.mutedVideoByFocusActor);
 
         actorParticipant = this.participants[actorId];
     }
@@ -1335,18 +1351,7 @@ JitsiConference.prototype.selectParticipants = function(participantIds) {
         throw new Error('Invalid argument; participantIds must be an array.');
     }
 
-    this.rtc.selectEndpoints(participantIds);
-};
-
-/**
- * Elects the participant with the given id to be the pinned participant in
- * order to always receive video for this participant (even when last n is
- * enabled).
- * @param participantId the identifier of the participant
- * @throws NetworkError or InvalidStateError or Error if the operation fails.
- */
-JitsiConference.prototype.pinParticipant = function(participantId) {
-    this.rtc.pinEndpoint(participantId);
+    this.receiveVideoController.selectEndpoints(participantIds);
 };
 
 /**
@@ -1374,7 +1379,7 @@ JitsiConference.prototype.setLastN = function(lastN) {
     if (n < -1) {
         throw new RangeError('lastN cannot be smaller than -1');
     }
-    this.rtc.setLastN(n);
+    this.receiveVideoController.setLastN(n);
 
     // If the P2P session is not fully established yet, we wait until it gets
     // established.
@@ -1506,13 +1511,21 @@ JitsiConference.prototype._maybeSetSITimeout = function() {
  * Mutes a participant.
  * @param {string} id The id of the participant to mute.
  */
-JitsiConference.prototype.muteParticipant = function(id) {
+JitsiConference.prototype.muteParticipant = function(id, mediaType) {
+    const muteMediaType = mediaType ? mediaType : MediaType.AUDIO;
+
+    if (muteMediaType !== MediaType.AUDIO && muteMediaType !== MediaType.VIDEO) {
+        logger.error(`Unsupported media type: ${muteMediaType}`);
+
+        return;
+    }
+
     const participant = this.getParticipantById(id);
 
     if (!participant) {
         return;
     }
-    this.room.muteParticipant(participant.getJid(), true);
+    this.room.muteParticipant(participant.getJid(), true, muteMediaType);
 };
 
 /* eslint-disable max-params */
@@ -1545,9 +1558,9 @@ JitsiConference.prototype.onMemberJoined = function(
     const participant
         = new JitsiParticipant(jid, this, nick, isHidden, statsID, status, identity);
 
-    participant._role = role;
-    participant._botType = botType;
-    participant._features = features || new Set();
+    participant.setRole(role);
+    participant.setBotType(botType);
+    participant.setFeatures(features);
 
     this.participants[id] = participant;
     this.eventEmitter.emit(
@@ -1615,7 +1628,7 @@ JitsiConference.prototype._onMemberBotTypeChanged = function(jid, botType) {
     const botParticipant = peers.find(p => p.getJid() === jid);
 
     if (botParticipant) {
-        botParticipant._botType = botType;
+        botParticipant.setBotType(botType);
         const id = Strophe.getResourceFromJid(jid);
 
         this.eventEmitter.emit(
@@ -1628,7 +1641,7 @@ JitsiConference.prototype._onMemberBotTypeChanged = function(jid, botType) {
     // poltergeist mode this is the moment when the poltergeist had exited and
     // the real participant had already replaced it.
     // In this case we can check and try p2p
-    if (!botParticipant._botType) {
+    if (!botParticipant.getBotType()) {
         this._maybeStartOrStopP2P();
     }
 };
@@ -1711,7 +1724,7 @@ JitsiConference.prototype.onUserRoleChanged = function(jid, role) {
     if (!participant) {
         return;
     }
-    participant._role = role;
+    participant.setRole(role);
     this.eventEmitter.emit(JitsiConferenceEvents.USER_ROLE_CHANGED, id, role);
 };
 
@@ -3203,7 +3216,7 @@ JitsiConference.prototype._maybeStartOrStopP2P = function(userLeftEvent) {
 JitsiConference.prototype._shouldBeInP2PMode = function() {
     const peers = this.getParticipants();
     const peerCount = peers.length;
-    const hasBotPeer = peers.find(p => p._botType === 'poltergeist' || p._features.has(FEATURE_JIGASI)) !== undefined;
+    const hasBotPeer = peers.find(p => p.getBotType() === 'poltergeist' || p.hasFeature(FEATURE_JIGASI)) !== undefined;
     const shouldBeInP2P = peerCount === 1 && !hasBotPeer;
 
     logger.debug(`P2P? peerCount: ${peerCount}, hasBotPeer: ${hasBotPeer} => ${shouldBeInP2P}`);
@@ -3359,7 +3372,7 @@ JitsiConference.prototype.getSpeakerStats = function() {
  * @returns {void}
  */
 JitsiConference.prototype.setReceiverVideoConstraint = function(maxFrameHeight) {
-    this.qualityController.setPreferredReceiveMaxFrameHeight(maxFrameHeight);
+    this.receiveVideoController.setPreferredReceiveMaxFrameHeight(maxFrameHeight);
 };
 
 /**
@@ -3370,7 +3383,7 @@ JitsiConference.prototype.setReceiverVideoConstraint = function(maxFrameHeight) 
  * successful and rejected otherwise.
  */
 JitsiConference.prototype.setSenderVideoConstraint = function(maxFrameHeight) {
-    return this.qualityController.setPreferredSendMaxFrameHeight(maxFrameHeight);
+    return this.sendVideoController.setPreferredSendMaxFrameHeight(maxFrameHeight);
 };
 
 /**

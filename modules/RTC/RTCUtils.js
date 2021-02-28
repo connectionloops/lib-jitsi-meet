@@ -11,6 +11,7 @@ import { getLogger } from 'jitsi-meet-logger';
 import clonedeep from 'lodash.clonedeep';
 
 import JitsiTrackError from '../../JitsiTrackError';
+import * as JitsiTrackErrors from '../../JitsiTrackErrors';
 import CameraFacingMode from '../../service/RTC/CameraFacingMode';
 import * as MediaType from '../../service/RTC/MediaType';
 import RTCEvents from '../../service/RTC/RTCEvents';
@@ -96,7 +97,7 @@ const featureDetectionAudioEl = document.createElement('audio');
 const isAudioOutputDeviceChangeAvailable
     = typeof featureDetectionAudioEl.setSinkId !== 'undefined';
 
-let availableDevices;
+let availableDevices = [];
 let availableDevicesPollTimer;
 
 /**
@@ -104,27 +105,6 @@ let availableDevicesPollTimer;
  */
 function emptyFuncton() {
     // no-op
-}
-
-/**
- * Initialize wrapper function for enumerating devices.
- * TODO: remove this, it should no longer be needed.
- *
- * @returns {?Function}
- */
-function initEnumerateDevicesWithCallback() {
-    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-        return callback => {
-            navigator.mediaDevices.enumerateDevices()
-                .then(devices => {
-                    updateKnownDevices(devices);
-                    callback(devices);
-                }, () => {
-                    updateKnownDevices([]);
-                    callback([]);
-                });
-        };
-    }
 }
 
 /**
@@ -564,7 +544,7 @@ function updateGrantedPermissions(um, stream) {
         grantedPermissions.audio = audioTracksReceived;
     }
 
-    eventEmitter.emit(RTCEvents.GRANTED_PERMISSIONS, grantedPermissions);
+    eventEmitter.emit(RTCEvents.PERMISSIONS_CHANGED, grantedPermissions);
 }
 
 /**
@@ -797,11 +777,8 @@ class RTCUtils extends Listenable {
             logger.info(`Disable HPF: ${disableHPF}`);
         }
 
-        availableDevices = [];
         window.clearInterval(availableDevicesPollTimer);
         availableDevicesPollTimer = undefined;
-
-        this.enumerateDevices = initEnumerateDevicesWithCallback();
 
         if (browser.usesNewGumFlow()) {
             this.RTCPeerConnectionType = RTCPeerConnection;
@@ -895,6 +872,24 @@ class RTCUtils extends Listenable {
         this.p2pPcConstraints = this.p2pPcConstraints || this.pcConstraints;
     }
 
+
+    /**
+     *
+     * @param {Function} callback
+     */
+    enumerateDevices(callback) {
+        navigator.mediaDevices.enumerateDevices()
+            .then(devices => {
+                updateKnownDevices(devices);
+                callback(devices);
+            })
+            .catch(error => {
+                logger.warn(`Failed to  enumerate devices. ${error}`);
+                updateKnownDevices([]);
+                callback([]);
+            });
+    }
+
     /* eslint-disable max-params */
 
     /**
@@ -911,27 +906,20 @@ class RTCUtils extends Listenable {
     * @param {Object} options.frameRate.max - Maximum fps
     * @param {bool}   options.screenShareAudio - Used by electron clients to
     * enable system audio screen sharing.
+    * @param {number} options.timeout - The timeout in ms for GUM.
     * @returns {Promise} Returns a media stream on success or a JitsiTrackError
     * on failure.
     **/
     getUserMediaWithConstraints(um, options = {}) {
-        const constraints = getConstraints(um, options);
+        const {
+            timeout,
+            ...otherOptions
+        } = options;
+        const constraints = getConstraints(um, otherOptions);
 
         logger.info('Get media constraints', JSON.stringify(constraints));
 
-        return new Promise((resolve, reject) => {
-            navigator.mediaDevices.getUserMedia(constraints)
-            .then(stream => {
-                logger.log('onUserMediaSuccess');
-                updateGrantedPermissions(um, stream);
-                resolve(stream);
-            })
-            .catch(error => {
-                logger.warn(`Failed to get access to local media. ${error} ${JSON.stringify(constraints)}`);
-                updateGrantedPermissions(um, undefined);
-                reject(new JitsiTrackError(error, constraints, um));
-            });
-        });
+        return this._getUserMedia(um, constraints, timeout);
     }
 
     /**
@@ -940,20 +928,50 @@ class RTCUtils extends Listenable {
      *
      * @param {array} umDevices which devices to acquire (e.g. audio, video)
      * @param {Object} constraints - Stream specifications to use.
+     * @param {number} timeout - The timeout in ms for GUM.
      * @returns {Promise}
      */
-    _newGetUserMediaWithConstraints(umDevices, constraints = {}) {
+    _getUserMedia(umDevices, constraints = {}, timeout = 0) {
         return new Promise((resolve, reject) => {
+            let gumTimeout, timeoutExpired = false;
+
+            if (typeof timeout === 'number' && !isNaN(timeout) && timeout > 0) {
+                gumTimeout = setTimeout(() => {
+                    timeoutExpired = true;
+                    gumTimeout = undefined;
+                    reject(new JitsiTrackError(JitsiTrackErrors.TIMEOUT));
+                }, timeout);
+            }
+
             navigator.mediaDevices.getUserMedia(constraints)
                 .then(stream => {
                     logger.log('onUserMediaSuccess');
                     updateGrantedPermissions(umDevices, stream);
-                    resolve(stream);
+                    if (!timeoutExpired) {
+                        if (typeof gumTimeout !== 'undefined') {
+                            clearTimeout(gumTimeout);
+                        }
+                        resolve(stream);
+                    }
                 })
                 .catch(error => {
                     logger.warn(`Failed to get access to local media. ${error} ${JSON.stringify(constraints)}`);
-                    updateGrantedPermissions(umDevices, undefined);
-                    reject(new JitsiTrackError(error, constraints, umDevices));
+                    const jitsiError = new JitsiTrackError(error, constraints, umDevices);
+
+                    if (!timeoutExpired) {
+                        if (typeof gumTimeout !== 'undefined') {
+                            clearTimeout(gumTimeout);
+                        }
+                        reject(error);
+                    }
+
+                    if (jitsiError.name === JitsiTrackErrors.PERMISSION_DENIED) {
+                        updateGrantedPermissions(umDevices, undefined);
+                    }
+
+                    // else {
+                    // Probably the error is not caused by the lack of permissions and we don't need to update them.
+                    // }
                 });
         });
     }
@@ -961,7 +979,7 @@ class RTCUtils extends Listenable {
     /**
      * Acquire a display stream via the screenObtainer. This requires extra
      * logic compared to use screenObtainer versus normal device capture logic
-     * in RTCUtils#_newGetUserMediaWithConstraints.
+     * in RTCUtils#_getUserMedia.
      *
      * @param {Object} options
      * @param {string[]} options.desktopSharingSources
@@ -1162,6 +1180,11 @@ class RTCUtils extends Listenable {
     newObtainAudioAndVideoPermissions(options) {
         logger.info('Using the new gUM flow');
 
+        const {
+            timeout,
+            ...otherOptions
+        } = options;
+
         const mediaStreamsMetaData = [];
 
         // Declare private functions to be used in the promise chain below.
@@ -1175,7 +1198,7 @@ class RTCUtils extends Listenable {
          * @returns {Promise}
          */
         const maybeRequestDesktopDevice = function() {
-            const umDevices = options.devices || [];
+            const umDevices = otherOptions.devices || [];
             const isDesktopDeviceRequested
                 = umDevices.indexOf('desktop') !== -1;
 
@@ -1187,7 +1210,7 @@ class RTCUtils extends Listenable {
                 desktopSharingSourceDevice,
                 desktopSharingSources,
                 desktopSharingFrameRate
-            } = options;
+            } = otherOptions;
 
             // Attempt to use a video input device as a screenshare source if
             // the option is defined.
@@ -1211,7 +1234,7 @@ class RTCUtils extends Listenable {
                 // Leverage the helper used by {@link _newGetDesktopMedia} to
                 // get constraints for the desktop stream.
                 const { gumOptions, trackOptions }
-                    = this._parseDesktopSharingOptions(options);
+                    = this._parseDesktopSharingOptions(otherOptions);
 
                 const constraints = {
                     video: {
@@ -1220,8 +1243,7 @@ class RTCUtils extends Listenable {
                     }
                 };
 
-                return this._newGetUserMediaWithConstraints(
-                    requestedDevices, constraints)
+                return this._getUserMedia(requestedDevices, constraints, timeout)
                     .then(stream => {
                         const track = stream && stream.getTracks()[0];
                         const applyConstrainsPromise
@@ -1297,7 +1319,7 @@ class RTCUtils extends Listenable {
          * @returns {Promise}
          */
         const maybeRequestCaptureDevices = function() {
-            const umDevices = options.devices || [ 'audio', 'video' ];
+            const umDevices = otherOptions.devices || [ 'audio', 'video' ];
             const requestedCaptureDevices = umDevices.filter(device => device === 'audio' || device === 'video');
 
             if (!requestedCaptureDevices.length) {
@@ -1305,12 +1327,11 @@ class RTCUtils extends Listenable {
             }
 
             const constraints = newGetConstraints(
-                requestedCaptureDevices, options);
+                requestedCaptureDevices, otherOptions);
 
             logger.info('Got media constraints: ', JSON.stringify(constraints));
 
-            return this._newGetUserMediaWithConstraints(
-                requestedCaptureDevices, constraints);
+            return this._getUserMedia(requestedCaptureDevices, constraints, timeout);
         }.bind(this);
 
         /**
@@ -1335,7 +1356,7 @@ class RTCUtils extends Listenable {
                 mediaStreamsMetaData.push({
                     stream: audioStream,
                     track: audioStream.getAudioTracks()[0],
-                    effects: options.effects
+                    effects: otherOptions.effects
                 });
             }
 
@@ -1348,7 +1369,7 @@ class RTCUtils extends Listenable {
                     stream: videoStream,
                     track: videoStream.getVideoTracks()[0],
                     videoType: VideoType.CAMERA,
-                    effects: options.effects
+                    effects: otherOptions.effects
                 });
             }
         };
@@ -1471,6 +1492,14 @@ class RTCUtils extends Listenable {
      */
     getCurrentlyAvailableMediaDevices() {
         return availableDevices;
+    }
+
+    /**
+     * Returns whether available devices have permissions granted
+     * @returns {Boolean}
+     */
+    arePermissionsGrantedForAvailableDevices() {
+        return availableDevices.some(device => Boolean(device.label));
     }
 
     /**

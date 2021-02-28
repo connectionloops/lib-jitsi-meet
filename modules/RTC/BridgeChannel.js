@@ -21,9 +21,8 @@ export default class BridgeChannel {
      * instance.
      * @param {string} [wsUrl] WebSocket URL.
      * @param {EventEmitter} emitter the EventEmitter instance to use for event emission.
-     * @param {function} senderVideoConstraintsChanged callback to call when the sender video constraints change.
      */
-    constructor(peerconnection, wsUrl, emitter, senderVideoConstraintsChanged) {
+    constructor(peerconnection, wsUrl, emitter) {
         if (!peerconnection && !wsUrl) {
             throw new TypeError('At least peerconnection or wsUrl must be given');
         } else if (peerconnection && wsUrl) {
@@ -52,8 +51,6 @@ export default class BridgeChannel {
 
         // Indicates whether the connection was closed from the client or not.
         this._closedFromClient = false;
-
-        this._senderVideoConstraintsChanged = senderVideoConstraintsChanged;
 
         // If a RTCPeerConnection is given, listen for new RTCDataChannel
         // event.
@@ -208,22 +205,6 @@ export default class BridgeChannel {
     }
 
     /**
-     * Sends a "pinned endpoint changed" message via the channel.
-     * @param {string} endpointId The id of the pinned endpoint.
-     * @throws NetworkError or InvalidStateError from RTCDataChannel#send (@see
-     * {@link https://developer.mozilla.org/docs/Web/API/RTCDataChannel/send})
-     * or from WebSocket#send or Error with "No opened channel" message.
-     */
-    sendPinnedEndpointMessage(endpointId) {
-        logger.log(`Sending pinned endpoint: ${endpointId}.`);
-
-        this._send({
-            colibriClass: 'PinnedEndpointChangedEvent',
-            pinnedEndpoint: endpointId || null
-        });
-    }
-
-    /**
      * Sends a "selected endpoints changed" message via the channel.
      *
      * @param {Array<string>} endpointIds - The ids of the selected endpoints.
@@ -250,6 +231,19 @@ export default class BridgeChannel {
         this._send({
             colibriClass: 'ReceiverVideoConstraint',
             maxFrameHeight: maxFrameHeightPixels
+        });
+    }
+
+    /**
+     * Sends a 'ReceiverVideoConstraints' message via the bridge channel.
+     *
+     * @param {ReceiverVideoConstraints} constraints video constraints.
+     */
+    sendNewReceiverVideoConstraintsMessage(constraints) {
+        logger.log(`Sending ReceiverVideoConstraints with ${JSON.stringify(constraints)}`);
+        this._send({
+            colibriClass: 'ReceiverVideoConstraints',
+            ...constraints
         });
     }
 
@@ -331,7 +325,7 @@ export default class BridgeChannel {
 
                 if (videoConstraints) {
                     logger.info(`SenderVideoConstraints: ${JSON.stringify(videoConstraints)}`);
-                    this._senderVideoConstraintsChanged(videoConstraints);
+                    emitter.emit(RTCEvents.SENDER_VIDEO_CONSTRAINTS_CHANGED, videoConstraints);
                 }
                 break;
             }
